@@ -1,4 +1,5 @@
 
+.cache*
 *.json
 ctags/ 
 text/
