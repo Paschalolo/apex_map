@@ -23,12 +23,15 @@
  * THE SOFTWARE.
  */
 
+#include <sys/mman.h>
+#include <linux/mman.h>
 #include <apex_hs_error.h>
 #include <apex_hs_hash.h>
 #include <concepts>
 #include <atomic>
 #include <new>
 #include <type_traits>
+#include <bit>
 /* Concepts */
 template <typename K , typename  H > 
 concept Apex_check =  requires(H h , K k){
@@ -39,7 +42,16 @@ concept Apex_check =  requires(H h , K k){
 /* Definitions*/ 
 constexpr auto  HDI_SZ2 = std::hardware_destructive_interference_size * 2 ;
 constexpr auto CACHE_LINE = std::hardware_destructive_interference_size ;
+constexpr char m_name[] = "apex_hash_map_data";
+constexpr size_t one_MB = 1ULL * 1024ULL * 1024ULL ;
+constexpr size_t five_hundred_MB  = 500ULL * 1024ULL * 1024ULL ;
 
+template <size_t ALIGN>
+size_t get_aligned_size(size_t sz ){
+	const size_t align_mask = !(sz & (ALIGN - 1)) -1  ;
+	auto align_sz = (sz+ ALIGN) & (~(ALIGN - 1));
+	return (align_sz & align_mask) | (sz & ~align_mask);
+}
 enum class apex_type  {
 	reader , writer 
 };
@@ -59,7 +71,7 @@ template <typename Key , typename Value , apex_type  AT ,typename Hash ,
 requires Apex_check<Key,Hash >
 class Apex_map{
 	public :
-		Apex_map() noexcept;
+		Apex_map(size_t ) noexcept;
 		int write()noexcept ; 
 		int read() noexcept;
 		~Apex_map();
@@ -70,15 +82,20 @@ class Apex_map{
 template <typename Key , typename Value ,  apex_type AT ,typename Hash , 
 	 size_t CB > 
 requires Apex_check<Key,Hash >
-Apex_map<Key , Value , AT , Hash , CB>::Apex_map() noexcept {
+Apex_map<Key , Value , AT , Hash , CB>::Apex_map(size_t sz ) noexcept : m_size{sz * CB } {
 	if constexpr (apex_type::reader == AT) {
-	
+		if(sz <= one_MB ){
+			
+		}else if( (sz> one_MB) && (sz < five_hundred_MB)){
+		}else if(sz >= five_hundred_MB) {
+		}	
+
 	}else if constexpr(apex_type::writer == AT){
 	}else {
 		static_assert(false  , "Dont know the type" );
 	}
 }
 int main(){
-
+	std::printf("%lu" , get_aligned_size<64ULL>(129ULL));
 	return 0;
 }
