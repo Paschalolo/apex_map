@@ -1,6 +1,6 @@
 # `mprobe`
 
-A zero-copy, wait-free, memory-mapped shared hash map engineered in C++20 for sub-microsecond IPC and market data telemetry. Backed by POSIX shared memory (`/dev/shm`), huge pages, and manual L1 cache line prefetching.
+A zero-copy, SPMC  wait-free, memory-mapped shared hash map engineered in C++20 for sub-microsecond IPC and market data telemetry. Backed by POSIX shared memory (`/dev/shm`), huge pages, and manual L1 cache line prefetching.
 
 ---
 
