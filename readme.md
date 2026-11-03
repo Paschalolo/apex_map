@@ -2,11 +2,11 @@
 
 A zero-copy, SPMC  wait-free, memory-mapped shared hash map engineered in C++20 for sub-microsecond IPC and market data telemetry. Backed by POSIX shared memory (`/dev/shm`), huge pages, and manual L1 cache line prefetching.
 
-NOTE : The hash map are good for read heavy worklads if there is a write heavy workload I recommned using a producer subscriber lock free architecture to aviod the coherecy issues and RFO invalidation signals that plagues multiple cores fighting to write and read a single memory location 
 ---
 
 ## Architecture & Mechanical Sympathy
 
+NOTE : The hash map are good for read heavy worklads if there is a write heavy workload I recommned using a producer subscriber lock free architecture to aviod the coherecy issues and RFO invalidation signals that plagues multiple cores fighting to write and read a single memory location 
 ```
                   Writer Process (Feed Handler / ITCH)
                                │
