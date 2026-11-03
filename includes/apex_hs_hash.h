@@ -26,5 +26,11 @@
  */
 #ifndef APEX_MAP_HASH_H 
 #define APEX_MAP_HASH_H
-
+#include <cstdio>
+template <typename T>
+struct dense_hash{
+	 inline __attribute__((always_inline)) size_t operator()(T index ){
+		return index;
+	}
+};
 #endif 
