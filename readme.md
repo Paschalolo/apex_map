@@ -6,7 +6,7 @@ A zero-copy, SPMC  wait-free, memory-mapped shared hash map engineered in C++20 
 
 ## Architecture & Mechanical Sympathy
 
-NOTE : The hash map are good for read heavy worklads if there is a write heavy workload I recommned using a producer subscriber lock free architecture to aviod the coherecy issues and RFO invalidation signals that plagues multiple cores fighting to write and read a single memory location 
+NOTE : The hash map are good for read heavy worklads if there is a write heavy workload I recommned using a producer subscriber lock free architecture to aviod the coherecy issues and RFO invalidation signals that plagues multiple cores fighting to write and read a single memory location. Recommended Reader Writer ratio 100+ : 1 . The hash map can scale on multiple cores well so far the ratio is resepcted. The writer can write 10,000 writes to 100,000 writes per second and the presure is negligable because of how much the readers access is randomized and the amount of reads outway writes greatly. 
 ```
                   Writer Process (Feed Handler / ITCH)
                                │
