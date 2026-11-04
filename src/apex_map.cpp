@@ -22,8 +22,11 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <cstddef>
+#include <emmintrin.h>
 #define _DEFAULT_SOURCE
+#if defined (__x86_64__)
+#include <xmmintrin.h>
+#endif
 #include <sys/mman.h>
 #include <cstdint>
 #include <unistd.h>
@@ -51,7 +54,7 @@ constexpr char m_shared_mem_name[] = "apex_hash_map_data";
 constexpr size_t _4_KB_PAGE = 4ULL * 1024ULL;
 constexpr size_t _2_MB_HUGE_PAGE  = 2ULL * 1024ULL * 1024ULL ;
 constexpr size_t _1_GB_HUGE_PAGE= 1ULL * 1024ULL * 1024ULL * 1024ULL;
-
+constexpr size_t BACKOFF = 8ULL ;
 template <size_t ALIGN>
 static inline size_t get_aligned_size(size_t sz ){
 	const size_t align_mask = !(sz & (ALIGN - 1)) -1  ;
@@ -70,7 +73,7 @@ template <typename Key , typename Value >
 struct alignas(HDI_SZ2) Payload{
 	std::atomic<Key> m_id ;
 	std::atomic<size_t>	seq ;
-	std::uint8_t m_mask ;
+	std::atomic<std::uint8_t> m_mask ;
 	alignas(CACHE_LINE) Value m_data ;	
 };
 
@@ -84,12 +87,12 @@ template <typename Key , typename Value , apex_type  AT  ,typename Hash ,
 	 size_t CB /*COLLISION BUFFER : This si the amount of of extra payload we can store due to a hash collision
 	 */ = 5ULL > 
 requires Apex_check<Key,Hash >
-class Apex_map{
+class alignas(32) Apex_map{
 	public :
 		Apex_map(size_t ) noexcept;
 		int write(Key key , Value v)noexcept ; 
 		int write(Key key , Value* val)noexcept ; 
-		int read() noexcept;
+		int read(const Key key , Value* output_val) const noexcept;
 		~Apex_map();
 		size_t 	size() const {
 			return m_size;
@@ -97,6 +100,7 @@ class Apex_map{
 	private : 
 		[[no_unique_address]] Hash m_hash{};
 		size_t m_size ; 
+		int openfd;
 		Payload<Key,  Value>* m_payload ;
 };
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
@@ -108,6 +112,7 @@ Apex_map<Key , Value , AT , Hash , HGT  , CB>::Apex_map(size_t sz ) noexcept  {
 			int ret ;
 			m_size = get_aligned_size<HGT>((sz*CB));
 			int fd = shm_open(m_shared_mem_name, O_RDWR | O_CREAT , S_IRWXU );
+			openfd = fd ;
 			if(fd == -1 ) {
 				failure_setup();	
 			}
@@ -199,7 +204,7 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value val) no
 	for(size_t i {0uz} ;i < CB ; i++){
 	// preetcjhing using non temporaal streaming
 		Key ky = payload_ptr[i].m_id.load(std::memory_order_relaxed);
-		auto msk = payload_ptr[i].m_mask;
+		auto msk = payload_ptr[i].m_mask.load(std::memory_order_relaxed);
 		if(key == ky){
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			payload_ptr[i].m_data = val ;
@@ -208,9 +213,9 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value val) no
 		}
 		if(msk != std::to_underlying(payload_mask::FILLED)){
 			/* new write create */
-			payload_ptr[i].m_mask = std::to_underlying(payload_mask::FILLED);
-			payload_ptr[i].m_id.store(key, std::memory_order_relaxed);
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
+			payload_ptr[i].m_mask.store(std::to_underlying(payload_mask::FILLED), std::memory_order_relaxed);
+			payload_ptr[i].m_id.store(key, std::memory_order_relaxed);
 			payload_ptr[i].m_data = val ;
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			goto proper_finish;	
@@ -246,9 +251,9 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value* val) n
 		}
 		if(msk != std::to_underlying(payload_mask::FILLED)){
 			/* new write create */
-			payload_ptr[i].m_mask = std::to_underlying(payload_mask::FILLED);
 			payload_ptr[i].m_id.store(key, std::memory_order_relaxed);
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
+			payload_ptr[i].m_mask.store( std::to_underlying(payload_mask::FILLED), std::memory_order_relaxed);
 			std::memcpy(static_cast<void*>(&(payload_ptr[i].m_data)) , static_cast<void*>(val) , sizeof(Value) );
 			std::atomic_thread_fence(std::memory_order_release);
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_relaxed);
@@ -268,17 +273,53 @@ proper_finish :
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
 requires Apex_check<Key,Hash >
-int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(Key key , Value* val) noexcept {
-
-	for(size_t i{0}; i < CB ; i++){}
+int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(const Key key , Value* output_val) const noexcept {
+	Key id ;	
+	const auto idx = m_hash(key);
+	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>(&(reinterpret_cast<Bucket<Key , Value>*>(m_payload)[idx]));
+	// preeftch and utilize streaming 
+	for(size_t i{0}; i < CB ; i++){
+	// prefect h and utilize streaming
+	 	id  = payload_ptr[i].m_id.load(std::memory_order_acquire);
+	 	if(id == key){
+			size_t j =BACKOFF ;
+			while(j--){
+				auto seq1 = payload_ptr[i].seq.load(std::memory_order_acquire);
+				if(seq1 & 0x01){
+					_mm_pause();
+					continue;	
+				}
+				std::memcpy(static_cast<void*>(output_val), static_cast<void*>(&(payload_ptr[i].m_data)) , sizeof(Value));
+				std::atomic_thread_fence(std::memory_order_acquire);
+				auto seq2 = payload_ptr[i].seq.load(std::memory_order_relaxed);	
+				if(seq1 != seq2){
+					_mm_pause();
+					continue;	
+				}
+				break ;
+			}
+		goto real_end;		
+	 	}	
+		if(payload_ptr[i].m_mask.load(std::memory_order_relaxed) != std::to_underlying(payload_mask::FILLED)){
+			return -2 ; /* nothing filled in array yet*/
+	 	}
+	}
+	return -1;/* Key not found */
+real_end: 
+	return 0;
 }
-/* deconstructor
- *	munmap
- *	shm_unlink
- *	close(fd) 
- *
- *
- * */ 
+
+
+template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
+	 size_t CB > 
+requires Apex_check<Key,Hash >
+Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::~Apex_map(){
+	munlock(static_cast<void*>(m_payload) , m_size);
+	munmap(static_cast<void*>(m_payload), m_size);
+	shm_unlink(m_shared_mem_name);
+	close(openfd);
+
+}
 int main(){
 	std::printf("%lu" , get_aligned_size<64ULL>(129ULL));
 	return 0;
