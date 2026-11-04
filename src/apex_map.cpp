@@ -22,6 +22,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include <cstddef>
 #define _DEFAULT_SOURCE
 #include <sys/mman.h>
 #include <cstdint>
@@ -258,10 +259,19 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value* val) n
 		}	
 	}
 	return -1;
+
+
 proper_finish :
 	return 0;
 }
 
+template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
+	 size_t CB > 
+requires Apex_check<Key,Hash >
+int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(Key key , Value* val) noexcept {
+
+	for(size_t i{0}; i < CB ; i++){}
+}
 /* deconstructor
  *	munmap
  *	shm_unlink
