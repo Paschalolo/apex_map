@@ -33,4 +33,11 @@ struct dense_hash{
 		return index;
 	}
 };
+
+template <typename T> 
+struct default_hash{
+	inline __attribute__((always_inline)) size_t operator()(T index){
+		
+	}
+};
 #endif 

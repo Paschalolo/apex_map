@@ -22,7 +22,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <emmintrin.h>
 #define _DEFAULT_SOURCE
 
 #if defined (__x86_64__)
@@ -108,6 +107,7 @@ class alignas(64) Apex_map{
 		int read(const Key key , Value* output_val)  noexcept;
 
 		template <typename U , typename Func>
+		requires std::is_same_v<std::invoke_result_t<Func, Payload<Key, Value>*>, void* >
 		int read_sub_value(const Key key ,Func func , U* output_val)  noexcept;
 		~Apex_map();
 		size_t 	size() const {
@@ -223,14 +223,16 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value val) no
 		Key ky = payload_ptr[i].m_id.load(std::memory_order_relaxed);
 		auto msk = payload_ptr[i].m_mask.load(std::memory_order_acquire);
 		if(key == ky){
-			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
+			payload_ptr[i].seq.fetch_add(1, std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_release);
 			payload_ptr[i].m_data = val ;
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			goto proper_finish;	
 		}
 		if(msk != std::to_underlying(payload_mask::FILLED)){
 			/* new write create */
-			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
+			payload_ptr[i].seq.fetch_add(1, std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_release);
 			payload_ptr[i].m_mask.store(std::to_underlying(payload_mask::FILLED), std::memory_order_relaxed);
 			payload_ptr[i].m_id.store(key, std::memory_order_relaxed);
 			payload_ptr[i].m_data = val ;
@@ -257,15 +259,17 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value* val) n
 		Key ky = payload_ptr[i].m_id.load(std::memory_order_relaxed);
 		auto msk = payload_ptr[i].m_mask.load(std::memory_order_acquire);
 		if(key == ky){
-			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
+			payload_ptr[i].seq.fetch_add(1, std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_release);
 			std::memcpy(static_cast<void*>(&(payload_ptr[i].m_data)) , static_cast<void*>(val) , sizeof(Value) );
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			goto proper_finish;	
 		}
 		if(msk != std::to_underlying(payload_mask::FILLED)){
 			/* new write create */
+			payload_ptr[i].seq.fetch_add(1, std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_release);
 			payload_ptr[i].m_id.store(key, std::memory_order_relaxed);
-			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			payload_ptr[i].m_mask.store( std::to_underlying(payload_mask::FILLED), std::memory_order_relaxed);
 			std::memcpy(static_cast<void*>(&(payload_ptr[i].m_data)) , static_cast<void*>(val) , sizeof(Value) );
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
@@ -297,21 +301,25 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(const Key key , Value* o
 				if(seq1 & 0x01){
 					#if defined (__x86_64__)
 					_mm_pause();
+					#elif defined(__aarch64__)
+    					__asm__ volatile("yield" ::: "memory");
 					#endif
 					continue;	
 				}
 				std::memcpy(static_cast<void*>(output_val), static_cast<void*>(&(payload_ptr[i].m_data)) , sizeof(Value));
-				std::atomic_thread_fence(std::memory_order_release);
+				std::atomic_thread_fence(std::memory_order_acquire);
 				auto seq2 = payload_ptr[i].seq.load(std::memory_order_relaxed);	
 				if(seq1 != seq2){
 					#if defined (__x86_64__)
 					_mm_pause();
+					#elif defined(__aarch64__)
+    					__asm__ volatile("yield" ::: "memory");
 					#endif
 					continue;	
 				}
-				break ;
+				goto real_end;		
 			}
-		goto real_end;		
+		return APEX_TIMEOUT;	
 	 	}	
 
 		if(payload_ptr[i].m_mask.load(std::memory_order_relaxed) != std::to_underlying(payload_mask::FILLED)){
@@ -328,6 +336,7 @@ template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t 
 	 size_t CB > 
 requires Apex_check<Key,Hash ,Value  >
 template <typename U , typename Func >
+requires std::is_same_v<std::invoke_result_t<Func, Payload<Key, Value>*>, void* >
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read_sub_value(const Key key ,Func func  , U* output_val)  noexcept{	
 	const auto idx = m_hash(key);
 	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>(&(reinterpret_cast<Bucket<Key , Value , CB>*>(m_payload)[idx]));
@@ -342,16 +351,20 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read_sub_value(const Key key 
 				if(seq1 & 0x01) {	
 					#if defined (__x86_64__)
 					_mm_pause();
+					#elif defined(__aarch64__)
+    					__asm__ volatile("yield" ::: "memory");
 					#endif
 					continue; ;
 				}
 
 				std::memcpy(static_cast<void*>(output_val), func(&(payload_ptr[i])) , sizeof(U));
-				std::atomic_thread_fence(std::memory_order_release);
+				std::atomic_thread_fence(std::memory_order_acquire);
 				auto seq2 = payload_ptr[i].seq.load(std::memory_order_relaxed);
 				if(seq1 != seq2){
 					#if defined (__x86_64__)
 					_mm_pause();
+					#elif defined(__aarch64__)
+    					__asm__ volatile("yield" ::: "memory");
 					#endif
 					continue; ;
 				}
@@ -367,6 +380,9 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read_sub_value(const Key key 
 real_end :
 	return 0 ;
 }
+
+
+
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
 requires Apex_check<Key,Hash ,Value  >
