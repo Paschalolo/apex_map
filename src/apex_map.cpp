@@ -22,11 +22,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <emmintrin.h>
 #define _DEFAULT_SOURCE
+
 #if defined (__x86_64__)
 #include <xmmintrin.h>
 #endif
+
 #include <sys/mman.h>
 #include <cstdint>
 #include <unistd.h>
@@ -38,12 +39,13 @@
 #include <cstring>
 #include <concepts>
 #include <atomic>
-#include <type_traits>
 #include <utility>
+#include <type_traits>
 /* Concepts */
-template <typename K , typename  H > 
+template <typename K , typename  H , typename Value > 
 concept Apex_check =  requires(H h , K k){
 	{h(k)} -> std::same_as<size_t>;
+	requires std::is_trivially_destructible_v<Value>; 
 };
 
 
@@ -55,6 +57,8 @@ constexpr size_t _4_KB_PAGE = 4ULL * 1024ULL;
 constexpr size_t _2_MB_HUGE_PAGE  = 2ULL * 1024ULL * 1024ULL ;
 constexpr size_t _1_GB_HUGE_PAGE= 1ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr size_t BACKOFF = 8ULL ;
+
+
 template <size_t ALIGN>
 static inline size_t get_aligned_size(size_t sz ){
 	const size_t align_mask = !(sz & (ALIGN - 1)) -1  ;
@@ -86,8 +90,8 @@ template <typename Key , typename Value , apex_type  AT  ,typename Hash ,
 	 size_t HGT = _4_KB_PAGE /* Default Page size */,
 	 size_t CB /*COLLISION BUFFER : This si the amount of of extra payload we can store due to a hash collision
 	 */ = 5ULL > 
-requires Apex_check<Key,Hash >
-class alignas(32) Apex_map{
+requires Apex_check<Key,Hash  , Value>
+class alignas(64) Apex_map{
 	public :
 		Apex_map(size_t ) noexcept;
 		int write(Key key , Value v)noexcept ; 
@@ -105,7 +109,7 @@ class alignas(32) Apex_map{
 };
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
-requires Apex_check<Key,Hash >
+requires Apex_check<Key,Hash , Value >
 Apex_map<Key , Value , AT , Hash , HGT  , CB>::Apex_map(size_t sz ) noexcept  {
 	if constexpr (apex_type::reader == AT) {
 
@@ -195,8 +199,9 @@ Apex_map<Key , Value , AT , Hash , HGT  , CB>::Apex_map(size_t sz ) noexcept  {
 
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
-requires Apex_check<Key,Hash >
+requires Apex_check<Key,Hash , Value >
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value val) noexcept {
+	static_assert(sizeof(Value) <= 8, "Size of value must be less than or equal to 8 bytes unless pass by pointer " );
 	auto idx = m_hash(key);
 	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>((&(reinterpret_cast<Bucket<Key,Value>*>(m_payload)[idx])));
 
@@ -233,7 +238,7 @@ proper_finish :
 
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
-requires Apex_check<Key,Hash >
+requires Apex_check<Key,Hash , Value >
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value* val) noexcept {
 	auto idx = m_hash(key);
 	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>((&(reinterpret_cast<Bucket<Key,Value>*>(m_payload)[idx])));
@@ -272,7 +277,7 @@ proper_finish :
 
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
-requires Apex_check<Key,Hash >
+requires Apex_check<Key,Hash  , Value>
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(const Key key , Value* output_val) const noexcept {
 	Key id ;	
 	const auto idx = m_hash(key);
@@ -312,7 +317,7 @@ real_end:
 
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
-requires Apex_check<Key,Hash >
+requires Apex_check<Key,Hash ,Value  >
 Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::~Apex_map(){
 	munlock(static_cast<void*>(m_payload) , m_size);
 	munmap(static_cast<void*>(m_payload), m_size);
@@ -320,6 +325,8 @@ Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::~Apex_map(){
 	close(openfd);
 
 }
+
+
 int main(){
 	std::printf("%lu" , get_aligned_size<64ULL>(129ULL));
 	return 0;
