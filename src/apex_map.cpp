@@ -22,6 +22,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include <emmintrin.h>
 #define _DEFAULT_SOURCE
 
 #if defined (__x86_64__)
@@ -42,6 +43,8 @@
 #include <utility>
 #include <type_traits>
 /* Concepts */
+
+
 template <typename K , typename  H , typename Value > 
 concept Apex_check =  requires(H h , K k){
 	{h(k)} -> std::same_as<size_t>;
@@ -53,18 +56,24 @@ concept Apex_check =  requires(H h , K k){
 constexpr auto  HDI_SZ2 = std::hardware_destructive_interference_size * 2 ;
 constexpr auto CACHE_LINE = std::hardware_destructive_interference_size ;
 constexpr char m_shared_mem_name[] = "apex_hash_map_data";
+
+/* HUGE PAGE SIZES */
 constexpr size_t _4_KB_PAGE = 4ULL * 1024ULL;
 constexpr size_t _2_MB_HUGE_PAGE  = 2ULL * 1024ULL * 1024ULL ;
 constexpr size_t _1_GB_HUGE_PAGE= 1ULL * 1024ULL * 1024ULL * 1024ULL;
+
+
 constexpr size_t BACKOFF = 8ULL ;
 
 
+/* This functions takes a size and rounds up to  the nearest ceiling of the alignment value */
 template <size_t ALIGN>
 static inline size_t get_aligned_size(size_t sz ){
 	const size_t align_mask = !(sz & (ALIGN - 1)) -1  ;
 	auto align_sz = (sz+ ALIGN) & (~(ALIGN - 1));
 	return (align_sz & align_mask) | (sz & ~align_mask);
 }
+
 enum class apex_type  {
 	reader , writer 
 };
@@ -96,7 +105,10 @@ class alignas(64) Apex_map{
 		Apex_map(size_t ) noexcept;
 		int write(Key key , Value v)noexcept ; 
 		int write(Key key , Value* val)noexcept ; 
-		int read(const Key key , Value* output_val) const noexcept;
+		int read(const Key key , Value* output_val)  noexcept;
+
+		template <typename U , typename Func>
+		int read_sub_value(const Key key ,Func func , U* output_val)  noexcept;
 		~Apex_map();
 		size_t 	size() const {
 			return m_size;
@@ -203,13 +215,13 @@ requires Apex_check<Key,Hash , Value >
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value val) noexcept {
 	static_assert(sizeof(Value) <= 8, "Size of value must be less than or equal to 8 bytes unless pass by pointer " );
 	auto idx = m_hash(key);
-	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>((&(reinterpret_cast<Bucket<Key,Value>*>(m_payload)[idx])));
+	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>((&(reinterpret_cast<Bucket<Key,Value , CB>*>(m_payload)[idx])));
 
 	// prefetching using non temporal streaming 
 	for(size_t i {0uz} ;i < CB ; i++){
 	// preetcjhing using non temporaal streaming
 		Key ky = payload_ptr[i].m_id.load(std::memory_order_relaxed);
-		auto msk = payload_ptr[i].m_mask.load(std::memory_order_relaxed);
+		auto msk = payload_ptr[i].m_mask.load(std::memory_order_acquire);
 		if(key == ky){
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			payload_ptr[i].m_data = val ;
@@ -225,9 +237,6 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value val) no
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			goto proper_finish;	
 		}
-		if(payload_ptr[i].m_mask == std::to_underlying(payload_mask::FILLED) && (ky != key)){
-			continue;	
-		}	
 	}
 	return -1;
 proper_finish : 
@@ -241,17 +250,16 @@ template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t 
 requires Apex_check<Key,Hash , Value >
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value* val) noexcept {
 	auto idx = m_hash(key);
-	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>((&(reinterpret_cast<Bucket<Key,Value>*>(m_payload)[idx])));
+	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>((&(reinterpret_cast<Bucket<Key,Value, CB>*>(m_payload)[idx])));
 	// prefetching using non temporal streaming 
 	for(size_t i {0uz} ;i < CB ; i++){
 	// preetcjhing using non temporaal streaming
 		Key ky = payload_ptr[i].m_id.load(std::memory_order_relaxed);
-		auto msk = payload_ptr[i].m_mask;
+		auto msk = payload_ptr[i].m_mask.load(std::memory_order_acquire);
 		if(key == ky){
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			std::memcpy(static_cast<void*>(&(payload_ptr[i].m_data)) , static_cast<void*>(val) , sizeof(Value) );
-			std::atomic_thread_fence(std::memory_order_release);
-			payload_ptr[i].seq.fetch_add(1, std::memory_order_relaxed);
+			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			goto proper_finish;	
 		}
 		if(msk != std::to_underlying(payload_mask::FILLED)){
@@ -260,13 +268,9 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value* val) n
 			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			payload_ptr[i].m_mask.store( std::to_underlying(payload_mask::FILLED), std::memory_order_relaxed);
 			std::memcpy(static_cast<void*>(&(payload_ptr[i].m_data)) , static_cast<void*>(val) , sizeof(Value) );
-			std::atomic_thread_fence(std::memory_order_release);
-			payload_ptr[i].seq.fetch_add(1, std::memory_order_relaxed);
+			payload_ptr[i].seq.fetch_add(1, std::memory_order_release);
 			goto proper_finish;	
 		}
-		if(payload_ptr[i].m_mask == std::to_underlying(payload_mask::FILLED) && (ky != key)){
-			continue;	
-		}	
 	}
 	return -1;
 
@@ -278,10 +282,10 @@ proper_finish :
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
 requires Apex_check<Key,Hash  , Value>
-int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(const Key key , Value* output_val) const noexcept {
+int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(const Key key , Value* output_val)  noexcept {
 	Key id ;	
 	const auto idx = m_hash(key);
-	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>(&(reinterpret_cast<Bucket<Key , Value>*>(m_payload)[idx]));
+	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>(&(reinterpret_cast<Bucket<Key , Value , CB>*>(m_payload)[idx]));
 	// preeftch and utilize streaming 
 	for(size_t i{0}; i < CB ; i++){
 	// prefect h and utilize streaming
@@ -291,22 +295,27 @@ int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(const Key key , Value* o
 			while(j--){
 				auto seq1 = payload_ptr[i].seq.load(std::memory_order_acquire);
 				if(seq1 & 0x01){
+					#if defined (__x86_64__)
 					_mm_pause();
+					#endif
 					continue;	
 				}
 				std::memcpy(static_cast<void*>(output_val), static_cast<void*>(&(payload_ptr[i].m_data)) , sizeof(Value));
-				std::atomic_thread_fence(std::memory_order_acquire);
+				std::atomic_thread_fence(std::memory_order_release);
 				auto seq2 = payload_ptr[i].seq.load(std::memory_order_relaxed);	
 				if(seq1 != seq2){
+					#if defined (__x86_64__)
 					_mm_pause();
+					#endif
 					continue;	
 				}
 				break ;
 			}
 		goto real_end;		
 	 	}	
+
 		if(payload_ptr[i].m_mask.load(std::memory_order_relaxed) != std::to_underlying(payload_mask::FILLED)){
-			return -2 ; /* nothing filled in array yet*/
+			return APEX_ENO_VALUE ; /* nothing filled in array yet*/
 	 	}
 	}
 	return -1;/* Key not found */
@@ -315,6 +324,49 @@ real_end:
 }
 
 
+template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
+	 size_t CB > 
+requires Apex_check<Key,Hash ,Value  >
+template <typename U , typename Func >
+int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read_sub_value(const Key key ,Func func  , U* output_val)  noexcept{	
+	const auto idx = m_hash(key);
+	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>(&(reinterpret_cast<Bucket<Key , Value , CB>*>(m_payload)[idx]));
+	Key id ;
+	// preeftch and utilize streaming
+	for(auto i{0uz} ; i < CB ; i++){
+		id = payload_ptr[i].m_id.load(std::memory_order_acquire);
+		if(key == id){
+			auto j = BACKOFF;
+			while(j--){
+				auto seq1 = payload_ptr[i].seq.load(std::memory_order_acquire);
+				if(seq1 & 0x01) {	
+					#if defined (__x86_64__)
+					_mm_pause();
+					#endif
+					continue; ;
+				}
+
+				std::memcpy(static_cast<void*>(output_val), func(&(payload_ptr[i])) , sizeof(U));
+				std::atomic_thread_fence(std::memory_order_release);
+				auto seq2 = payload_ptr[i].seq.load(std::memory_order_relaxed);
+				if(seq1 != seq2){
+					#if defined (__x86_64__)
+					_mm_pause();
+					#endif
+					continue; ;
+				}
+			goto real_end;	
+			}
+			return APEX_TIMEOUT;
+		}
+		if(payload_ptr[i].m_mask.load(std::memory_order_relaxed) != std::to_underlying(payload_mask::FILLED)){
+			return APEX_ENO_VALUE ; /* nothing filled in array yet*/
+	 	}
+	}
+	return APEX_ENORM ;
+real_end :
+	return 0 ;
+}
 template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t HGT, 
 	 size_t CB > 
 requires Apex_check<Key,Hash ,Value  >
