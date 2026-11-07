@@ -41,6 +41,7 @@
 #include <atomic>
 #include <utility>
 #include <type_traits>
+#include <cstdio>
 /* Concepts */
 
 
@@ -94,7 +95,7 @@ struct alignas(HDI_SZ2) Bucket {
 	Payload<Key , Value>  m_payloads[CB];
 };
 /* APEX MAP */
-template <typename Key , typename Value , apex_type  AT  ,typename Hash , 
+template <typename Key , typename Value , apex_type  AT  ,typename Hash = default_hash<Key> , 
 	 size_t HGT = _4_KB_PAGE /* Default Page size */,
 	 size_t CB /*COLLISION BUFFER : This si the amount of of extra payload we can store due to a hash collision
 	 */ = 5ULL > 
@@ -115,7 +116,8 @@ class alignas(64) Apex_map{
 		}
 	private : 
 		[[no_unique_address]] Hash m_hash{};
-		size_t m_size ; 
+		size_t m_size ;
+		size_t m_no ;
 		int openfd;
 		Payload<Key,  Value>* m_payload ;
 };
@@ -126,13 +128,15 @@ Apex_map<Key , Value , AT , Hash , HGT  , CB>::Apex_map(size_t sz ) noexcept  {
 	if constexpr (apex_type::reader == AT) {
 
 			int ret ;
-			m_size = get_aligned_size<HGT>((sz*CB));
+
+			m_size = get_aligned_size<HGT>((sz*CB * sizeof(Payload<Key, Value>)));
+			m_no = sz;
 			int fd = shm_open(m_shared_mem_name, O_RDWR | O_CREAT , S_IRWXU );
 			openfd = fd ;
 			if(fd == -1 ) {
 				failure_setup();	
 			}
-			ret =ftruncate(fd , m_size);
+			ret =ftruncate(fd , static_cast<off_t>(m_size));
 			if(ret == -1 ) {
 				failure_setup();
 			}
@@ -167,12 +171,12 @@ Apex_map<Key , Value , AT , Hash , HGT  , CB>::Apex_map(size_t sz ) noexcept  {
 			
 	}else if constexpr(apex_type::writer == AT){
 			int ret ;
-			m_size = get_aligned_size<HGT>((sz*CB));
+			m_size = get_aligned_size<HGT>((sz*CB * sizeof(Payload<Key, Value>)));
 			int fd = shm_open(m_shared_mem_name, O_RDWR | O_CREAT , S_IRWXU );
 			if(fd == -1 ) {
 				failure_setup();	
 			}
-			ret =ftruncate(fd , m_size);
+			ret =ftruncate(fd , static_cast<off_t>(m_size));
 			if(ret == -1 ) {
 				failure_setup();
 			}
@@ -214,7 +218,7 @@ template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t 
 requires Apex_check<Key,Hash , Value >
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value val) noexcept {
 	static_assert(sizeof(Value) <= 8, "Size of value must be less than or equal to 8 bytes unless pass by pointer " );
-	auto idx = m_hash(key);
+	auto idx = m_hash(key) % m_no;
 	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>((&(reinterpret_cast<Bucket<Key,Value , CB>*>(m_payload)[idx])));
 
 	// prefetching using non temporal streaming 
@@ -251,7 +255,7 @@ template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t 
 	 size_t CB > 
 requires Apex_check<Key,Hash , Value >
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::write(Key key , Value* val) noexcept {
-	auto idx = m_hash(key);
+	auto idx = m_hash(key) %m_no ;
 	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>((&(reinterpret_cast<Bucket<Key,Value, CB>*>(m_payload)[idx])));
 	// prefetching using non temporal streaming 
 	for(size_t i {0uz} ;i < CB ; i++){
@@ -288,7 +292,7 @@ template <typename Key , typename Value ,  apex_type AT , typename Hash ,size_t 
 requires Apex_check<Key,Hash  , Value>
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read(const Key key , Value* output_val)  noexcept {
 	Key id ;	
-	const auto idx = m_hash(key);
+	const auto idx = m_hash(key) % m_no;
 	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>(&(reinterpret_cast<Bucket<Key , Value , CB>*>(m_payload)[idx]));
 	// preeftch and utilize streaming 
 	for(size_t i{0}; i < CB ; i++){
@@ -338,7 +342,7 @@ requires Apex_check<Key,Hash ,Value  >
 template <typename U , typename Func >
 requires std::is_same_v<std::invoke_result_t<Func, Payload<Key, Value>*>, void* >
 int Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::read_sub_value(const Key key ,Func func  , U* output_val)  noexcept{	
-	const auto idx = m_hash(key);
+	const auto idx = m_hash(key) % m_no;
 	Payload<Key, Value>* payload_ptr = reinterpret_cast<Payload<Key, Value>*>(&(reinterpret_cast<Bucket<Key , Value , CB>*>(m_payload)[idx]));
 	Key id ;
 	// preeftch and utilize streaming
@@ -394,8 +398,43 @@ Apex_map<Key ,  Value,  AT,  Hash , HGT , CB>::~Apex_map(){
 
 }
 
+/* Testing */
+struct toy{
+	size_t data ; 
+	size_t count ; 
+	size_t food;
+};
+/* ask if i kill writer reader will die too*/
 
+/* Hunt down uncessufukl bug inn reader and writer  some of the writes are failign */ 
 int main(){
-	std::printf("%lu" , get_aligned_size<64ULL>(129ULL));
+#ifdef WRITER
+	Apex_map<int,toy,apex_type::writer> my_hashmap{6000};
+	int ret; 
+	for(size_t i = 0 ; i < 100 ; i++){
+		toy tt{i* 7 , i * 99 , 100-i};
+		ret = my_hashmap.write(static_cast<int>(i) ,&tt );
+		if(ret < 0 ) std::printf("unsuccesful ");
+		if(ret == 0 ) std::printf("wrote %lu " , i);
+	}
+	std::printf("\n");
+#endif 
+#ifdef READER 
+	Apex_map<int,toy,apex_type::reader> my_hashmap{6000};
+	alignas(32) toy dt ;
+	int ret ;
+	for(size_t i = 0 ; i < 100 ; i++){
+		ret = my_hashmap.read(static_cast<int>(i) , &dt);
+		if(ret == -1) {
+			std::printf("failure");
+		}
+		if(ret == 0 ){
+			std::printf("dta\n");
+		std::printf("data : %lu count : %lu food : %lu\n" , dt.data , dt.count , dt.food);}
+	}
+#endif 
+	while(true){}
+
+
 	return 0;
 }

@@ -27,17 +27,19 @@
 #ifndef APEX_MAP_HASH_H 
 #define APEX_MAP_HASH_H
 #include <cstdio>
+#include <cstdint>
 template <typename T>
 struct dense_hash{
 	 inline __attribute__((always_inline)) size_t operator()(T index ){
 		return index;
 	}
 };
-
+__extension__ typedef unsigned __int128 uint128_t;
 template <typename T> 
 struct default_hash{
-	inline __attribute__((always_inline)) size_t operator()(T index){
-		
+	inline __attribute__((always_inline)) size_t operator()(T index) noexcept{
+		uint128_t prod = index * 0x2d358dccaa6c78a5ULL/* HIgh bit entropy*/; 
+		return static_cast<uint64_t>(prod) ^ static_cast<uint64_t>(prod >> 64);	
 	}
 };
 #endif 
