@@ -55,7 +55,7 @@ concept Apex_check =  requires(H h , K k){
 /* Definitions*/ 
 constexpr auto  HDI_SZ2 = std::hardware_destructive_interference_size * 2 ;
 constexpr auto CACHE_LINE = std::hardware_destructive_interference_size ;
-constexpr char m_shared_mem_name[] = "apex_hash_map_data";
+constexpr char m_shared_mem_name[] = "/apex_hash_map_data";
 
 /* HUGE PAGE SIZES */
 constexpr size_t _4_KB_PAGE = 4ULL * 1024ULL;
